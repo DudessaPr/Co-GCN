@@ -54,6 +54,8 @@ class MixedGraphConvolution(nn.Module):
             gHT = torch.transpose(self.H.grad, 0, 1)
             self.alpha[i] -= self.lr_alpha * torch.trace(torch.mm(gHT, partial_H)).item()
             self._update_adj()
+            step = self.lr_alpha * torch.trace(torch.mm(gHT, partial_H)).item()
+            # print(i, "step", step, "alpha_before", self.alpha[i])
 
     def forward(self, input):
         self.input = input

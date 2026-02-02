@@ -110,7 +110,7 @@ if __name__ == '__main__':
     random.seed(args.seed)
     use_cuda = args.cuda and torch.cuda.is_available()
     device = torch.device('cuda' if use_cuda else 'cpu')
-    name=['Reuters'];
+    name=['Reuters']
     for name_num in range(len(name)):
         args.dataset = name[name_num]
         file = open('F:\wxh_work\py_semi\co_gcn_master/res/' + args.dataset + '.txt', 'w')
