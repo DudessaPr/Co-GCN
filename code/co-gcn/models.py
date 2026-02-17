@@ -86,102 +86,167 @@ class CoGCN(nn.Module):
         x = F.dropout(x, self.dropout, training=self.training)
         x = self.gc2(x)
         return F.log_softmax(x, dim=1)
-
-class AudioSCNN(nn.Module):
-    def __init__(self, n_classes=5):
-        super(AudioSCNN, self).__init__()
-        self.conv1 = nn.Conv1d(in_channels=1, out_channels=256, kernel_size=5, padding=2)
-        self.conv2 = nn.Conv1d(in_channels=256, out_channels=128, kernel_size=5, padding=2)
-
-        self.dropout1 = nn.Dropout(0.1)
-
-        self.maxpool1 = nn.MaxPool1d(kernel_size=8, stride=8)
-
-        self.conv3 = nn.Conv1d(in_channels=128, out_channels=128, kernel_size=5, padding=2)
-        self.conv4 = nn.Conv1d(in_channels=128, out_channels=128, kernel_size=5, padding=2)
-
-        self.dropout2 = nn.Dropout(0.5)
-
-        self.classifier = nn.Linear(in_features=128 * 22, out_features=n_classes)
-        
-        self.relu = nn.ReLU()
     
+class AudioSCNN(nn.Module):
+    def __init__(self, num_classes: int = 5):
+        super().__init__()
+
+        self.features = nn.Sequential(
+            nn.Conv1d(1, 256, kernel_size=5, padding=2),
+            nn.ReLU(),
+
+            nn.Conv1d(256, 128, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+
+            nn.MaxPool1d(8),
+
+            nn.Conv1d(128, 128, kernel_size=5, padding=2),
+            nn.ReLU(),
+
+            nn.Conv1d(128, 128, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+        )
+
+        self.classifier = nn.Linear(128 * 22, num_classes)
+        
     def forward(self, x, return_features=False):
-        x = self.relu(self.conv1(x)) # [, 1, 180] - > [, 256, 180]
-        x = self.relu(self.conv2(x)) # [, 256, 180] - > [, 128, 180]
-        x = self.dropout1(x) # [, 128, 180] -> [, 128, 180]
-        x = self.maxpool1(x) # [, 128, 180] -> [, 128, 22]
-        x = self.relu(self.conv3(x)) # [, 128, 22] - > [, 128, 22]
-        x = self.relu(self.conv4(x)) # [, 128, 22] - > [, 128, 22]
-        x = self.dropout2(x) # [, 128, 22] -> [, 128, 22]
-        x = torch.flatten(x, 1) # [, 128, 22] -> [, 128x22]
+        x = self.features(x)
+        x = torch.flatten(x, 1)
         feats = x
-        logits = self.classifier(x) # [, 128x22] -> [, 5]
+        logits = self.classifier(x)
+        if return_features:
+            return logits, feats
+        return logits
+
+
+
+class EEGNet(nn.Module):
+    """
+    EEGNet: A Compact Convolutional Neural Network for EEG-based Brain-Computer Interfaces.
+    """
+
+    def __init__(self, nb_classes, Chans=64, Samples=128, dropoutRate=0.5,
+                 kernLength=64, F1=8, D=2, F2=16, norm_rate=0.25):
+        super(EEGNet, self).__init__()
+
+        self.Chans = Chans
+        self.Samples = Samples
+
+        # Block 1: Temporal Convolution + Depthwise Spatial Convolution
+        self.block1 = nn.Sequential(
+            # Padding='same' requires PyTorch >= 1.9
+            nn.Conv2d(1, F1, (1, kernLength), padding='same', bias=False),
+            nn.BatchNorm2d(F1),
+            # Depthwise Convolution
+            nn.Conv2d(F1, D * F1, (Chans, 1), groups=F1, bias=False),
+            nn.BatchNorm2d(D * F1),
+            nn.ELU(),
+            nn.AvgPool2d((1, 4)),
+            nn.Dropout(dropoutRate)
+        )
+
+        # Block 2: Separable Convolution
+        self.block2 = nn.Sequential(
+            # Separable Conv Part 1 (Depthwise)
+            nn.Conv2d(D * F1, D * F1, (1, 16), padding='same', groups=D * F1, bias=False),
+            # Separable Conv Part 2 (Pointwise)
+            nn.Conv2d(D * F1, F2, (1, 1), bias=False),
+            nn.BatchNorm2d(F2),
+            nn.ELU(),
+            nn.AvgPool2d((1, 8)),
+            nn.Dropout(dropoutRate)
+        )
+
+        self.flatten = nn.Flatten()
+
+        # Dynamically calculate the size of the linear layer input
+        # This prevents errors if you change Chans or Samples
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, 1, Chans, Samples)
+            x = self.block1(dummy_input)
+            x = self.block2(x)
+            x = self.flatten(x)
+            n_flatten = x.shape[1]
+
+        self.classifier = nn.Linear(n_flatten, nb_classes)
+
+    def forward(self, x, return_features=False):
+        # Input shape: (Batch, Chans, Samples)
+        # We need to add the "Channel" dimension for Conv2d: (Batch, 1, Chans, Samples)
+        if x.dim() == 3:
+            x = x.unsqueeze(1)
+
+        x = self.block1(x)
+        x = self.block2(x)
+        x = self.flatten(x)
+        feats = x
+        logits = self.classifier(x)
         if return_features:
             return logits, feats
         return logits
     
-class EEGNet(nn.Module):
-    def __init__(self, nb_classes, Chans=64, Samples=128, dropoutRate=0.5, kernLength=64, F1=8, D=2, F2=16,
-                 norm_rate=0.25, dropoutType='Dropout'):
-        super(EEGNet, self).__init__()
 
-        if dropoutType not in ('Dropout', 'SpatialDropout2D'):
-            raise ValueError('dropoutType must be one of SpatialDropout2D or Dropout, passed as a string.')
+class EEGNet_tor(nn.Module):
+    def __init__(self, nb_classes, Chans=30, Samples=500, dropoutRate=0.5, kernLength=300, F1=8, D=8, F2=64,
+                 norm_rate=1.0, dropoutType='Dropout'):
+        super(EEGNet_tor, self).__init__()
+
+        # Configure dropout
         self.dropout = nn.Dropout(dropoutRate) if dropoutType == 'Dropout' else nn.Dropout2d(dropoutRate)
 
         # Block 1
-        self.firstConv = nn.Conv2d(1, F1, (1, kernLength), padding="same", bias=False)
+        self.firstConv = nn.Conv2d(1, F1, (1, kernLength), padding='same', bias=False)
         self.firstBN = nn.BatchNorm2d(F1)
+        self.elu = nn.ELU()
 
         self.depthwiseConv = nn.Conv2d(F1, F1 * D, (Chans, 1), groups=F1, padding=0, bias=False)
         self.depthwiseBN = nn.BatchNorm2d(F1 * D)
         self.depthwisePool = nn.AvgPool2d((1, 4))
 
-        # Block 2: SeparableConv2D = depthwise (1x16) + pointwise (1x1)
-        self.separableDepth = nn.Conv2d(F1 * D, F1 * D, (1, 16), groups=F1 * D, padding="same", bias=False)
-        self.separablePoint = nn.Conv2d(F1 * D, F2, (1, 1), padding=0, bias=False)
+        # Max-norm should be applied without replacing layer outputs.
+        self.depthwiseConv.register_forward_pre_hook(
+            self._make_max_norm_pre_hook(norm_rate))
+
+        # Block 2
+        self.separableConv = nn.Conv2d(F1 * D, F2, (1, 16), padding='same', bias=False)
         self.separableBN = nn.BatchNorm2d(F2)
         self.separablePool = nn.AvgPool2d((1, 8))
 
-        self.elu = nn.ELU()
-
         # Final layers
         self.flatten = nn.Flatten()
-        self.dense = nn.Linear(F2 * (Samples // 4 // 8), nb_classes)
+        self.dense = nn.Linear(F2 * ((Samples // 4 // 8)), nb_classes)
+        self.softmax = nn.Softmax(dim=1)
 
-        # Max-norm constraints
-        self.depthwise_maxnorm = 1.0
-        self.dense_maxnorm = norm_rate
+        self.dense.register_forward_pre_hook(
+            self._make_max_norm_pre_hook(norm_rate))
 
-    def _apply_maxnorm(self):
-        # Match Keras max_norm constraint behavior on weights
-        if self.depthwise_maxnorm is not None:
-            self.depthwiseConv.weight.data.renorm_(p=2, dim=0, maxnorm=self.depthwise_maxnorm)
-        if self.dense_maxnorm is not None:
-            self.dense.weight.data.renorm_(p=2, dim=0, maxnorm=self.dense_maxnorm)
+    @staticmethod
+    def _make_max_norm_pre_hook(norm_rate):
+        def hook(module, _inputs):
+            module.weight.data.renorm_(p=2, dim=0, maxnorm=norm_rate)
+        return hook
 
     def forward(self, x, return_features=False):
-        self._apply_maxnorm()
-
         x = self.firstConv(x)
         x = self.firstBN(x)
+        x = self.elu(x)
         x = self.depthwiseConv(x)
         x = self.depthwiseBN(x)
         x = self.elu(x)
         x = self.depthwisePool(x)
         x = self.dropout(x)
-
-        x = self.separableDepth(x)
-        x = self.separablePoint(x)
+        x = self.separableConv(x)
         x = self.separableBN(x)
         x = self.elu(x)
         x = self.separablePool(x)
         x = self.dropout(x)
-
         x = self.flatten(x)
+
         feats = x
-        logits = self.dense(x)
+        logits = self.softmax(self.dense(x))
+
         if return_features:
             return logits, feats
         return logits
